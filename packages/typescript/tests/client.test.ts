@@ -177,6 +177,22 @@ describe("NamiFusion#run", () => {
     expect(key1).toBeTruthy();
     expect(key1).toBe(key2);
   });
+
+  it("generates a fresh Idempotency-Key for each independent call to run() (regression guard: the key must be generated per-call, not cached on the client)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { task_uuid: "t1", status: "pending" }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const client = new NamiFusion({ apiKey: API_KEY, baseUrl: BASE_URL });
+    await client.run("acme/model-x", { input: {} });
+    await client.run("acme/model-x", { input: {} });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const key1 = (fetchMock.mock.calls[0][1].headers as Headers).get("idempotency-key");
+    const key2 = (fetchMock.mock.calls[1][1].headers as Headers).get("idempotency-key");
+    expect(key1).toBeTruthy();
+    expect(key2).toBeTruthy();
+    expect(key1).not.toBe(key2);
+  });
 });
 
 describe("NamiFusion#getTask", () => {
@@ -390,6 +406,48 @@ describe("NamiFusion#subscribe", () => {
 
     // only the initial run() POST happened — no poll was ever issued
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects with signal.reason and does not call onUpdate when aborted while a getTask poll is in flight", async () => {
+    vi.useFakeTimers();
+
+    let resolveGetTaskFetch!: (response: Response) => void;
+    const getTaskFetchPromise = new Promise<Response>((resolve) => {
+      resolveGetTaskFetch = resolve;
+    });
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, { task_uuid: "t1", status: "pending" }))
+      .mockImplementationOnce(() => getTaskFetchPromise);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const controller = new AbortController();
+    const abortReason = new Error("caller cancelled");
+    const onUpdate = vi.fn();
+    const client = new NamiFusion({ apiKey: API_KEY, baseUrl: BASE_URL });
+    const promise = client.subscribe("acme/model-x", {
+      input: {},
+      onUpdate,
+      signal: controller.signal,
+    });
+    const assertion = expect(promise).rejects.toBe(abortReason);
+
+    // advance past the first poll's sleep so the getTask() fetch is issued and in flight
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(fetchMock).toHaveBeenCalledTimes(2); // run POST + in-flight getTask GET
+
+    // abort while that getTask HTTP request is still pending (unresolved)
+    controller.abort(abortReason);
+
+    // now let the in-flight getTask response resolve — it should still complete normally,
+    // but the post-getTask abort check must reject before onUpdate is invoked
+    resolveGetTaskFetch(jsonResponse(200, makeTask({ status: "processing" })));
+
+    await assertion;
+
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(2); // no further polls after the abort
   });
 });
 

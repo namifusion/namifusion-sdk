@@ -211,6 +211,9 @@ export class NamiFusion {
       await sleep(Math.min(interval, timeoutMs - elapsed), signal);
 
       const task = await this.getTask(submitted.task_uuid);
+      if (signal?.aborted) {
+        throw signal.reason ?? new Error("Aborted");
+      }
       onUpdate?.(task);
 
       if (task.status === "completed") {
