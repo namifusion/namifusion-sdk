@@ -17,6 +17,12 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const POLL_INTERVAL_BACKOFF_FACTOR = 1.5;
 const POLL_INTERVAL_CAP_MS = 10_000;
+/** Minimum remaining budget (ms) required before subscribe() will fire
+ * another getTask poll. Below this, a request has no realistic chance of
+ * completing a round trip before the hard deadline, so subscribe() throws
+ * its own timeout error immediately instead of sending a request that's
+ * certain to fail. */
+const SUBSCRIBE_DEADLINE_THRESHOLD_MS = 50;
 /** 30 minutes — a wavespeed-python-style lenient default; a tighter
  * default (e.g. 10 minutes) would spuriously time out slower video models. */
 const DEFAULT_SUBSCRIBE_TIMEOUT_MS = 1_800_000;
@@ -292,24 +298,59 @@ export class NamiFusion {
       signal,
       timeoutMs: perRequestTimeoutMs(),
     });
+
+    // Shared by every throw site below so a subscribe()-level timeout —
+    // whichever check catches it — always has the same shape:
+    // NamiFusionError + detail {task_uuid, timeout_ms}.
+    const subscribeTimeoutError = (): NamiFusionError =>
+      new NamiFusionError(
+        `subscribe() timed out after ${timeoutMs}ms waiting for task ${submitted.task_uuid} to reach a terminal state`,
+        0,
+        { detail: { task_uuid: submitted.task_uuid, timeout_ms: timeoutMs } },
+      );
+
     let interval = pollIntervalMs;
 
     for (;;) {
       const elapsed = Date.now() - startedAt;
       if (elapsed >= timeoutMs) {
-        throw new NamiFusionError(
-          `subscribe() timed out after ${timeoutMs}ms waiting for task ${submitted.task_uuid} to reach a terminal state`,
-          0,
-          { detail: { task_uuid: submitted.task_uuid, timeout_ms: timeoutMs } },
-        );
+        throw subscribeTimeoutError();
       }
 
       await sleep(Math.min(interval, timeoutMs - elapsed), signal);
 
-      const task = await this.getTask(submitted.task_uuid, {
-        signal,
-        timeoutMs: perRequestTimeoutMs(),
-      });
+      // Re-check the remaining budget after sleeping: if what's left is
+      // below SUBSCRIBE_DEADLINE_THRESHOLD_MS, a getTask round trip has no
+      // realistic chance of succeeding — throw subscribe()'s own timeout
+      // error directly instead of sending a request that's certain to fail.
+      if (startedAt + timeoutMs - Date.now() < SUBSCRIBE_DEADLINE_THRESHOLD_MS) {
+        throw subscribeTimeoutError();
+      }
+
+      let task: Task;
+      try {
+        task = await this.getTask(submitted.task_uuid, {
+          signal,
+          timeoutMs: perRequestTimeoutMs(),
+        });
+      } catch (err) {
+        // getTask()'s own deadline-converged per-request timeout (from
+        // perRequestTimeoutMs() above) fires exactly when the hard
+        // subscribe deadline is reached mid-flight. Surface subscribe()'s
+        // own timeout error in that case instead of leaking the raw
+        // transport-level TimeoutError — but only once the deadline has
+        // actually elapsed; any other failure (including a
+        // client-timeoutMs-bound timeout that fires before the deadline)
+        // is rethrown unchanged.
+        if (
+          err instanceof DOMException &&
+          err.name === "TimeoutError" &&
+          Date.now() - startedAt >= timeoutMs
+        ) {
+          throw subscribeTimeoutError();
+        }
+        throw err;
+      }
       if (signal?.aborted) {
         throw signal.reason ?? new Error("Aborted");
       }

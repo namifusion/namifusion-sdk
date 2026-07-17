@@ -371,10 +371,12 @@ describe("NamiFusion#subscribe", () => {
     await vi.runAllTimersAsync();
     await assertion;
 
-    // 1 run POST + 2 polls that fit inside the 5000ms budget (waits of 2000
-    // then 3000 exactly exhaust it; the 3rd wait would start at elapsed=5000
-    // and is skipped in favor of throwing immediately).
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // 1 run POST + 1 poll: the first 2000ms wait fits inside the 5000ms
+    // budget and its poll fires normally; the second wait (3000ms) exactly
+    // exhausts the budget, leaving 0ms remaining — below
+    // SUBSCRIBE_DEADLINE_THRESHOLD_MS, so the 2nd poll is never sent and
+    // subscribe() throws its own timeout error immediately instead.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
 
     const err = (await promise.catch((e) => e)) as NamiFusionError;
     expect(err).not.toBeInstanceOf(TaskFailedError);
@@ -535,7 +537,17 @@ describe("NamiFusion#subscribe", () => {
       pollIntervalMs: 1000,
       timeoutMs: 3000,
     });
-    const assertion = expect(promise).rejects.toMatchObject({ name: "TimeoutError" });
+    // The in-flight getTask's own deadline-converged timeout (2000ms,
+    // fired at t=1000) elapses exactly at the hard deadline (t=3000).
+    // subscribe() must surface this as its own NamiFusionError timeout,
+    // not the raw transport-level TimeoutError that caused it — the
+    // original `rejects.toMatchObject({ name: "TimeoutError" })` assertion
+    // this replaced was cementing that leak.
+    const assertion = expect(promise).rejects.toMatchObject({
+      name: "NamiFusionError",
+      message: expect.stringMatching(/timed out/i),
+      detail: { task_uuid: "t1", timeout_ms: 3000 },
+    });
 
     // run submitted at t=0; first sleep(1000) elapses → getTask issued at
     // t=1000 with a converged timeout of min(60000, 3000-1000)=2000ms.
@@ -552,6 +564,36 @@ describe("NamiFusion#subscribe", () => {
     await assertion;
 
     expect(fetchMock).toHaveBeenCalledTimes(2); // no new request initiated past the budget
+  });
+
+  it("throws subscribe()'s own timeout error without sending a doomed getTask when the post-sleep remaining budget is below the threshold", async () => {
+    vi.useFakeTimers();
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, { task_uuid: "t1", status: "pending" }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const client = new NamiFusion({ apiKey: API_KEY, baseUrl: BASE_URL });
+    // pollIntervalMs 1000 against a 1020ms budget: the first sleep leaves
+    // only 20ms remaining — under SUBSCRIBE_DEADLINE_THRESHOLD_MS (50ms) —
+    // so subscribe() must not fire a getTask that has no realistic chance
+    // of completing in time.
+    const promise = client.subscribe("acme/model-x", {
+      input: {},
+      pollIntervalMs: 1000,
+      timeoutMs: 1020,
+    });
+    const assertion = expect(promise).rejects.toMatchObject({
+      name: "NamiFusionError",
+      message: expect.stringMatching(/timed out/i),
+      detail: { task_uuid: "t1", timeout_ms: 1020 },
+    });
+
+    await vi.runAllTimersAsync();
+    await assertion;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1); // only the initial run() POST — no doomed getTask
   });
 });
 

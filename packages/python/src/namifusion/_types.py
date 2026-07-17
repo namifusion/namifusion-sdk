@@ -17,7 +17,7 @@ client, not dataclasses.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import MISSING, dataclass, field, fields
 from typing import Any, Dict, List, Mapping, Optional
 
 from ._errors import NamiFusionError
@@ -44,6 +44,12 @@ def _from_dict(cls, data: Mapping[str, Any]):
     raises ``NamiFusionError`` — with the raw body on ``.detail`` — rather
     than a bare ``AttributeError`` from ``data.items()``. Mirrors client.ts's
     response-shape check.
+
+    Likewise, a 2xx JSON object that's missing a field this response type
+    requires (e.g. an upstream proxy stripping ``task_uuid``) raises
+    ``NamiFusionError`` — with the raw body on ``.detail`` — instead of a
+    bare ``TypeError`` from the dataclass constructor's missing-positional-
+    argument check. Mirrors client.ts's ``assertObjectResponse()``.
     """
     if not isinstance(data, Mapping):
         raise NamiFusionError(
@@ -51,8 +57,22 @@ def _from_dict(cls, data: Mapping[str, Any]):
             f"got {type(data).__name__}",
             detail=data,
         )
-    known = {f.name for f in fields(cls)}
+    cls_fields = fields(cls)
+    known = {f.name for f in cls_fields}
     kwargs = {key: value for key, value in data.items() if key in known}
+
+    missing = sorted(
+        f.name
+        for f in cls_fields
+        if f.default is MISSING and f.default_factory is MISSING and f.name not in kwargs
+    )
+    if missing:
+        raise NamiFusionError(
+            f"Malformed API response: {cls.__name__} response is missing required "
+            f"field(s) {', '.join(missing)}",
+            detail=data,
+        )
+
     return cls(**kwargs)
 
 

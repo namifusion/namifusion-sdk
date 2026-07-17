@@ -154,7 +154,9 @@ you write yourself is only safe if you pass the same `idempotencyKey` on every
 attempt** — otherwise each attempt gets a fresh key and is billed separately:
 
 ```ts
-const idempotencyKey = crypto.randomUUID();
+import { randomUUID } from "node:crypto";
+
+const idempotencyKey = randomUUID();
 for (let attempt = 0; ; attempt++) {
   try {
     return await client.run(modelId, { input, idempotencyKey });
@@ -185,7 +187,11 @@ const client = new NamiFusion({
 `subscribe()` additionally takes `pollIntervalMs` (default `2000`, backed
 off x1.5 per poll, capped at `10000`), a total `timeoutMs` (default
 `1_800_000` — 30 minutes), an `onUpdate` callback fired once per poll, and an
-`AbortSignal`.
+`AbortSignal`. Note that transport-layer retry backoff (including
+`Retry-After` waits) doesn't count against this deadline convergence, so in
+the worst case a single retryable response can push the total duration past
+the budget (by at most one `Retry-After` cap); for latency-sensitive use
+cases, pass `signal` to cancel actively or tighten `maxRetries`.
 
 ## License
 

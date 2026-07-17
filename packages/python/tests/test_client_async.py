@@ -243,12 +243,20 @@ class TestSubscribeAsync:
         err = exc_info.value
         assert not isinstance(err, TaskFailedError)
         assert err.detail == {"task_uuid": "t1", "timeout": 5.0}
-        assert len(calls) == 3
+        # 1 run POST + 1 poll: the first 2.0s wait fits inside the 5.0s
+        # budget and its poll fires normally; the second wait (3.0s)
+        # exactly exhausts the budget, leaving 0s remaining — below
+        # _SUBSCRIBE_DEADLINE_THRESHOLD, so the 2nd poll is never sent and
+        # subscribe() raises its own timeout error immediately instead.
+        assert len(calls) == 2
 
     async def test_converges_each_request_timeout_to_remaining_budget(self):
         # Async mirror of the sync hard-deadline test: each internal request
-        # runs with a budget-converged timeout (5.0 -> 3.0 -> 0.001), never
-        # the flat 60s client timeout.
+        # runs with a budget-converged timeout (5.0 -> 3.0), never the flat
+        # 60s client timeout. The would-be 3rd poll (remaining budget 0s at
+        # t=5.0) is never sent: it falls below _SUBSCRIBE_DEADLINE_THRESHOLD,
+        # so subscribe() raises its own timeout error instead of firing a
+        # request certain to fail.
         processing = make_task(status="processing")
         transport, calls = sequenced_transport(
             [json_response(200, {"task_uuid": "t1", "status": "pending"})]
@@ -270,10 +278,9 @@ class TestSubscribeAsync:
         def read_timeout(req):
             return req.extensions["timeout"]["read"]
 
-        assert len(calls) == 3
+        assert len(calls) == 2  # 1 run + 1 poll fit the 5.0s budget; the 2nd poll is skipped
         assert read_timeout(calls[0]) == pytest.approx(5.0)
         assert read_timeout(calls[1]) == pytest.approx(3.0)
-        assert read_timeout(calls[2]) == pytest.approx(0.001)
 
     async def test_cancellation_propagates_without_being_swallowed(self):
         # Regression guard for the async-only semantic the brief calls

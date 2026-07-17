@@ -81,6 +81,28 @@ class TestTask:
             Task.from_dict(html)
         assert exc_info.value.detail == html
 
+    def test_from_dict_raises_namifusion_error_when_a_required_field_is_missing(self):
+        # A 2xx JSON object missing a required key (e.g. an upstream proxy
+        # stripping `task_uuid`) must raise NamiFusionError — with the raw
+        # body on .detail — not a bare TypeError from the dataclass
+        # constructor's missing-positional-argument check.
+        data = {
+            "model_id": "acme/model-x",
+            "status": "pending",
+            "created_at": "2026-07-17T00:00:00Z",
+        }
+        with pytest.raises(NamiFusionError) as exc_info:
+            Task.from_dict(data)
+        assert exc_info.value.detail == data
+        assert "task_uuid" in exc_info.value.message
+
+    def test_from_dict_lists_every_missing_required_field(self):
+        with pytest.raises(NamiFusionError) as exc_info:
+            Task.from_dict({"status": "pending"})
+        assert "task_uuid" in exc_info.value.message
+        assert "model_id" in exc_info.value.message
+        assert "created_at" in exc_info.value.message
+
 
 class TestRunResult:
     def test_attribute_access(self):
@@ -104,6 +126,13 @@ class TestRunResult:
         assert result.task_uuid == "t1"
         assert result.cost_credits == 5
         assert not hasattr(result, "future_field")
+
+    def test_from_dict_raises_namifusion_error_when_status_missing(self):
+        data = {"task_uuid": "t1", "estimated_time": 30}
+        with pytest.raises(NamiFusionError) as exc_info:
+            RunResult.from_dict(data)
+        assert exc_info.value.detail == data
+        assert "status" in exc_info.value.message
 
 
 class TestListTasksResult:
@@ -137,7 +166,11 @@ class TestListTasksResult:
         assert result.items == []
 
     def test_from_dict_raises_when_total_missing(self):
-        # A server response missing "total" must raise, not silently
-        # report a count of 0 and mask the malformed response.
-        with pytest.raises(TypeError):
+        # A server response missing "total" must raise NamiFusionError (not
+        # silently report a count of 0, and not a bare TypeError from the
+        # dataclass constructor), mirroring assertObjectResponse() on the TS
+        # side.
+        with pytest.raises(NamiFusionError) as exc_info:
             ListTasksResult.from_dict({"items": []})
+        assert exc_info.value.detail == {"items": []}
+        assert "total" in exc_info.value.message

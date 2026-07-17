@@ -149,6 +149,14 @@ def _sleep_duration(interval: float, elapsed: float, timeout: float) -> float:
 #: timeout once the subscribe deadline is spent.
 _MIN_REQUEST_TIMEOUT = 0.001
 
+#: Minimum remaining budget (seconds) required before subscribe() will fire
+#: another get_task poll. Below this, a request has no realistic chance of
+#: completing a round trip before the hard deadline, so subscribe() raises
+#: its own timeout error immediately instead of sending a request that's
+#: certain to fail. Mirrors client.ts's SUBSCRIBE_DEADLINE_THRESHOLD_MS
+#: (50ms).
+_SUBSCRIBE_DEADLINE_THRESHOLD = 0.05
+
 
 def _request_timeout(client_timeout: float, deadline: float, now: float) -> float:
     """Converges a single request's timeout to
@@ -290,10 +298,32 @@ class NamiFusion:
 
             self._sleep(_sleep_duration(interval, elapsed, timeout))
 
-            task = self.get_task(
-                submitted.task_uuid,
-                _timeout=_request_timeout(self._timeout, deadline, self._now()),
-            )
+            # Re-check the remaining budget after sleeping: if what's left
+            # is below _SUBSCRIBE_DEADLINE_THRESHOLD, a get_task round trip
+            # has no realistic chance of succeeding — raise subscribe()'s
+            # own timeout error directly instead of sending a request
+            # that's certain to fail.
+            if deadline - self._now() < _SUBSCRIBE_DEADLINE_THRESHOLD:
+                raise _subscribe_timeout_error(submitted.task_uuid, timeout)
+
+            try:
+                task = self.get_task(
+                    submitted.task_uuid,
+                    _timeout=_request_timeout(self._timeout, deadline, self._now()),
+                )
+            except httpx.TimeoutException:
+                # get_task()'s own deadline-converged per-request timeout
+                # (from _request_timeout() above) fires exactly when the
+                # hard subscribe deadline is reached mid-flight. Surface
+                # subscribe()'s own timeout error in that case instead of
+                # leaking the raw httpx timeout exception — but only once
+                # the deadline has actually elapsed; any other failure
+                # (including a client-timeout-bound timeout that fires
+                # before the deadline) is reraised unchanged.
+                if self._now() - start >= timeout:
+                    raise _subscribe_timeout_error(submitted.task_uuid, timeout) from None
+                raise
+
             if on_update is not None:
                 on_update(task)
 
@@ -429,10 +459,32 @@ class AsyncNamiFusion:
             # below.
             await self._sleep(_sleep_duration(interval, elapsed, timeout))
 
-            task = await self.get_task(
-                submitted.task_uuid,
-                _timeout=_request_timeout(self._timeout, deadline, self._now()),
-            )
+            # Re-check the remaining budget after sleeping: if what's left
+            # is below _SUBSCRIBE_DEADLINE_THRESHOLD, a get_task round trip
+            # has no realistic chance of succeeding — raise subscribe()'s
+            # own timeout error directly instead of sending a request
+            # that's certain to fail.
+            if deadline - self._now() < _SUBSCRIBE_DEADLINE_THRESHOLD:
+                raise _subscribe_timeout_error(submitted.task_uuid, timeout)
+
+            try:
+                task = await self.get_task(
+                    submitted.task_uuid,
+                    _timeout=_request_timeout(self._timeout, deadline, self._now()),
+                )
+            except httpx.TimeoutException:
+                # get_task()'s own deadline-converged per-request timeout
+                # (from _request_timeout() above) fires exactly when the
+                # hard subscribe deadline is reached mid-flight. Surface
+                # subscribe()'s own timeout error in that case instead of
+                # leaking the raw httpx timeout exception — but only once
+                # the deadline has actually elapsed; any other failure
+                # (including a client-timeout-bound timeout that fires
+                # before the deadline) is reraised unchanged.
+                if self._now() - start >= timeout:
+                    raise _subscribe_timeout_error(submitted.task_uuid, timeout) from None
+                raise
+
             if on_update is not None:
                 on_update(task)
 

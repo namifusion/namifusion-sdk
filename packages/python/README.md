@@ -199,7 +199,11 @@ client = NamiFusion(
 
 `subscribe()` additionally takes `poll_interval` (default `2.0`s, backed off
 x1.5 per poll, capped at `10.0`s), a total `timeout` (default `1800.0`s — 30
-minutes), and an `on_update` callback fired once per poll.
+minutes), and an `on_update` callback fired once per poll. Note that
+transport-layer retry backoff (including `Retry-After` waits) doesn't count
+against this deadline convergence, so in the worst case a single retryable
+response can push the total duration past the budget (by at most one
+`Retry-After` cap); for latency-sensitive use cases, tighten `max_retries`.
 
 ## License
 

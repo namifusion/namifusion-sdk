@@ -370,11 +370,13 @@ class TestSubscribe:
         assert "timed out" in err.message.lower()
         assert err.detail == {"task_uuid": "t1", "timeout": 5.0}
 
-        # 1 run POST + 2 polls fit inside the 5.0s budget (waits of 2.0
-        # then 3.0 exactly exhaust it; the 3rd wait would start at
-        # elapsed=5.0 and is skipped in favor of raising immediately).
-        assert len(calls) == 3
-        assert len(updates) == 2
+        # 1 run POST + 1 poll: the first 2.0s wait fits inside the 5.0s
+        # budget and its poll fires normally; the second wait (3.0s)
+        # exactly exhausts the budget, leaving 0s remaining — below
+        # _SUBSCRIBE_DEADLINE_THRESHOLD, so the 2nd poll is never sent and
+        # subscribe() raises its own timeout error immediately instead.
+        assert len(calls) == 2
+        assert len(updates) == 1
         assert clock.sleep_calls == [2.0, 3.0]
 
     def test_on_update_not_called_again_after_terminal_state_reached(self):
@@ -451,8 +453,11 @@ class TestSubscribeHardDeadline:
     def test_converges_each_request_timeout_to_remaining_budget(self):
         # httpx records a request's timeout in request.extensions["timeout"];
         # asserting on it proves each internal run()/get_task() ran with a
-        # budget-converged timeout (5.0 -> 3.0 -> 0.001), never the flat 60s
-        # client timeout — i.e. subscribe's total timeout is a hard deadline.
+        # budget-converged timeout (5.0 -> 3.0), never the flat 60s client
+        # timeout — i.e. subscribe's total timeout is a hard deadline. The
+        # would-be 3rd poll (remaining budget 0s at t=5.0) is never sent:
+        # it falls below _SUBSCRIBE_DEADLINE_THRESHOLD, so subscribe() raises
+        # its own timeout error instead of firing a request certain to fail.
         processing = make_task(status="processing")
         transport, calls = sequenced_transport(
             [json_response(200, {"task_uuid": "t1", "status": "pending"})]
@@ -474,10 +479,65 @@ class TestSubscribeHardDeadline:
         def read_timeout(req):
             return req.extensions["timeout"]["read"]
 
-        assert len(calls) == 3  # 1 run + 2 polls fit the 5.0s budget
+        assert len(calls) == 2  # 1 run + 1 poll fit the 5.0s budget; the 2nd poll is skipped
         assert read_timeout(calls[0]) == pytest.approx(5.0)  # submit at t=0
         assert read_timeout(calls[1]) == pytest.approx(3.0)  # poll at t=2.0
-        assert read_timeout(calls[2]) == pytest.approx(0.001)  # poll at t=5.0, floored
+
+    def test_skips_a_doomed_poll_when_post_sleep_remaining_budget_is_below_threshold(self):
+        # poll_interval 1.0 against a 1.02s budget: the first sleep leaves
+        # only 0.02s remaining — under _SUBSCRIBE_DEADLINE_THRESHOLD (0.05s)
+        # — so subscribe() must not fire a get_task that has no realistic
+        # chance of completing in time.
+        transport, calls = sequenced_transport(
+            [json_response(200, {"task_uuid": "t1", "status": "pending"})]
+        )
+        clock = FakeClock()
+        client = NamiFusion(
+            api_key=API_KEY, base_url=BASE_URL, _transport=transport, _sleep=clock.sleep, _now=clock.now
+        )
+
+        with pytest.raises(NamiFusionError) as exc_info:
+            client.subscribe("acme/model-x", input={}, poll_interval=1.0, timeout=1.02)
+
+        assert exc_info.value.detail == {"task_uuid": "t1", "timeout": 1.02}
+        assert len(calls) == 1  # only the initial run() POST — no doomed get_task
+
+    def test_converts_a_deadline_bound_httpx_timeout_into_subscribe_timeout_error(self):
+        # A get_task poll fired with a healthy remaining budget can still be
+        # the *last* one before the hard deadline: if it only fails via its
+        # own httpx timeout once the deadline has already elapsed, that must
+        # surface as subscribe()'s own NamiFusionError, not the raw httpx
+        # exception — mirrors client.ts's DOMException-"TimeoutError" catch.
+        call_count = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return json_response(200, {"task_uuid": "t1", "status": "pending"})
+            # Simulate the request itself consuming time before ultimately
+            # timing out, carrying the fake clock past the deadline.
+            clock.value += 2.5
+            raise httpx.ReadTimeout("simulated deadline-bound timeout", request=request)
+
+        transport = httpx.MockTransport(handler)
+        clock = FakeClock()
+        client = NamiFusion(
+            api_key=API_KEY,
+            base_url=BASE_URL,
+            max_retries=0,
+            _transport=transport,
+            _sleep=clock.sleep,
+            _now=clock.now,
+        )
+
+        with pytest.raises(NamiFusionError) as exc_info:
+            client.subscribe("acme/model-x", input={}, poll_interval=1.0, timeout=3.0)
+
+        err = exc_info.value
+        assert not isinstance(err, TaskFailedError)
+        assert "timed out" in err.message.lower()
+        assert err.detail == {"task_uuid": "t1", "timeout": 3.0}
+        assert call_count["n"] == 2  # run + the one poll that raised httpx.ReadTimeout
 
 
 class TestMalformedResponses:
