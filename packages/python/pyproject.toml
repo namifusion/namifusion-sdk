@@ -14,8 +14,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/shanweimu/namifusion-sdk"
-Repository = "https://github.com/shanweimu/namifusion-sdk"
+Homepage = "https://github.com/namifusion/namifusion-sdk"
+Repository = "https://github.com/namifusion/namifusion-sdk"
 
 [project.optional-dependencies]
 dev = [
