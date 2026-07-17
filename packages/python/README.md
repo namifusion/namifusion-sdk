@@ -120,8 +120,11 @@ task = client.subscribe("some/model", input={"image": data_url})
 
 ## Errors
 
-Every error the SDK raises extends `NamiFusionError` (`message`, `status`,
-`code`, `detail`):
+Every _HTTP-level_ error the SDK raises extends `NamiFusionError` (`message`,
+`status`, `code`, `detail`). The one exception: when automatic retries for a
+network failure are exhausted, the SDK re-raises the original `httpx` error
+(an `httpx.RequestError`) unchanged — there's no HTTP response to map onto a
+`NamiFusionError`. Catch `NamiFusionError` and let anything else propagate.
 
 | Class | HTTP status | Raised when |
 | --- | --- | --- |
@@ -154,11 +157,27 @@ responses are never retried.
 
 `run()` — including the one `subscribe()` calls internally — always sends an
 `Idempotency-Key` header: either the `idempotency_key` you pass, or an
-auto-generated UUID that's reused across the SDK's own retry attempts of
-that call. The server maps the same account + key to the task created by the
-*first* call and returns that task instead of creating a new one, without
-charging again. That makes retrying a run — automatic or your own — safe
-from duplicate billing.
+auto-generated UUID. The server maps the same account + key to the task
+created by the *first* call and returns that task instead of creating a new
+one, without charging again.
+
+The auto-generated key is reused across the SDK's *own* retry attempts of a
+single call, so the SDK's automatic retries never double-bill. **A retry loop
+you write yourself is only safe if you pass the same `idempotency_key` on every
+attempt** — otherwise each attempt gets a fresh key and is billed separately:
+
+```python
+import uuid
+
+idempotency_key = str(uuid.uuid4())
+for attempt in range(4):
+    try:
+        result = client.run(model_id, input=input_data, idempotency_key=idempotency_key)
+        break
+    except NamiFusionError:
+        if attempt == 3:
+            raise
+```
 
 ## Configuration
 

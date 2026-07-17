@@ -101,8 +101,12 @@ returns `Promise<string>`.
 
 ## Errors
 
-Every error the SDK throws extends `NamiFusionError` (`message`, `status`,
-`code?`, `detail?`):
+Every _HTTP-level_ error the SDK throws extends `NamiFusionError` (`message`,
+`status`, `code?`, `detail?`). The one exception: when automatic retries for a
+network failure are exhausted, the SDK re-throws the original `fetch` error
+(typically a `TypeError`) unchanged — there's no HTTP response to map onto a
+`NamiFusionError`. Guard with `instanceof NamiFusionError` and let anything
+else propagate.
 
 | Class | HTTP status | Thrown when |
 | --- | --- | --- |
@@ -140,11 +144,25 @@ are never retried.
 
 `run()` — including the one `subscribe()` calls internally — always sends an
 `Idempotency-Key` header: either the `idempotencyKey` you pass, or an
-auto-generated UUID that's reused across the SDK's own retry attempts of
-that call. The server maps the same account + key to the task created by the
-*first* call and returns that task instead of creating a new one, without
-charging again. That makes retrying a run — automatic or your own — safe
-from duplicate billing.
+auto-generated UUID. The server maps the same account + key to the task
+created by the *first* call and returns that task instead of creating a new
+one, without charging again.
+
+The auto-generated key is reused across the SDK's *own* retry attempts of a
+single call, so the SDK's automatic retries never double-bill. **A retry loop
+you write yourself is only safe if you pass the same `idempotencyKey` on every
+attempt** — otherwise each attempt gets a fresh key and is billed separately:
+
+```ts
+const idempotencyKey = crypto.randomUUID();
+for (let attempt = 0; ; attempt++) {
+  try {
+    return await client.run(modelId, { input, idempotencyKey });
+  } catch (err) {
+    if (attempt >= 3 || !(err instanceof NamiFusionError)) throw err;
+  }
+}
+```
 
 ## Configuration
 
