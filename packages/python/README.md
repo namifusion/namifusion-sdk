@@ -184,4 +184,4 @@ minutes), and an `on_update` callback fired once per poll.
 
 ## License
 
-MIT — see [LICENSE](../../LICENSE).
+MIT — see [LICENSE](./LICENSE).

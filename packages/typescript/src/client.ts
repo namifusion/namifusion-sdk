@@ -33,6 +33,31 @@ function apiKeyFromEnv(): string | undefined {
   return process.env?.NAMIFUSION_API_KEY;
 }
 
+/** Generates a UUIDv4 string for use as an auto Idempotency-Key.
+ *
+ * Prefers `globalThis.crypto.randomUUID()`, but falls back to a
+ * `Math.random()`-based UUIDv4 when it's unavailable. That happens on
+ * Node 18: the SDK's floor is `engines: ">=18"`, but the Web Crypto API
+ * was only exposed as a global (unflagged) starting in Node 19 — on
+ * Node 18 it lives behind `--experimental-global-webcrypto` and
+ * `globalThis.crypto` is `undefined` by default, so calling
+ * `crypto.randomUUID()` directly throws a ReferenceError. An idempotency
+ * key only needs to be unique-enough to dedupe retries of a single call,
+ * not cryptographically unpredictable, so the fallback's non-CSPRNG
+ * randomness is an acceptable tradeoff here. */
+function generateIdempotencyKey(): string {
+  const webCrypto = globalThis.crypto;
+  if (webCrypto?.randomUUID) {
+    return webCrypto.randomUUID();
+  }
+
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 /** Resolves after `ms` milliseconds, or rejects immediately with
  * `signal.reason` if `signal` fires while waiting. This mirrors http.ts's
  * private `sleep()` helper; duplicated here rather than imported since
@@ -104,12 +129,12 @@ export class NamiFusion {
    * route parameter).
    *
    * When `idempotencyKey` is omitted, one is generated via
-   * `crypto.randomUUID()` and reused for every retry attempt of this
+   * `generateIdempotencyKey()` and reused for every retry attempt of this
    * request (http.ts's `request()` builds the headers object once and
    * reuses it across retries), so retrying a POST /run is always safe.
    */
   async run(modelId: string, options: RunOptions): Promise<RunResult> {
-    const idempotencyKey = options.idempotencyKey ?? crypto.randomUUID();
+    const idempotencyKey = options.idempotencyKey ?? generateIdempotencyKey();
     const body: Record<string, unknown> = { input: options.input };
     if (options.webhookUrl !== undefined) {
       body.webhook_url = options.webhookUrl;
@@ -205,6 +230,7 @@ export class NamiFusion {
         throw new NamiFusionError(
           `subscribe() timed out after ${timeoutMs}ms waiting for task ${submitted.task_uuid} to reach a terminal state`,
           0,
+          { detail: { task_uuid: submitted.task_uuid, timeout_ms: timeoutMs } },
         );
       }
 

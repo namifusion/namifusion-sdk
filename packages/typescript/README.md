@@ -171,4 +171,4 @@ off x1.5 per poll, capped at `10000`), a total `timeoutMs` (default
 
 ## License
 
-MIT — see [LICENSE](../../LICENSE).
+MIT — see [LICENSE](./LICENSE).

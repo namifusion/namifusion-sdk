@@ -94,6 +94,7 @@ describe("NamiFusion#run", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   it("POSTs {baseUrl}/run/{modelId} with modelId concatenated raw (slashes not encoded) and body {input}", async () => {
@@ -127,6 +128,23 @@ describe("NamiFusion#run", () => {
     expect(headers.get("idempotency-key")).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
     );
+  });
+
+  it("falls back to a Math.random UUIDv4 when globalThis.crypto is unavailable (Node 18 without --experimental-global-webcrypto)", async () => {
+    vi.stubGlobal("crypto", undefined);
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { task_uuid: "t1", status: "pending" }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const client = new NamiFusion({ apiKey: API_KEY, baseUrl: BASE_URL });
+    await client.run("acme/model-x", { input: {} });
+    await client.run("acme/model-x", { input: {} });
+
+    const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const firstKey = (fetchMock.mock.calls[0][1].headers as Headers).get("idempotency-key");
+    const secondKey = (fetchMock.mock.calls[1][1].headers as Headers).get("idempotency-key");
+    expect(firstKey).toMatch(uuidV4Pattern);
+    expect(secondKey).toMatch(uuidV4Pattern);
+    expect(firstKey).not.toBe(secondKey);
   });
 
   it("sends the caller-supplied idempotencyKey verbatim when provided", async () => {
@@ -361,6 +379,7 @@ describe("NamiFusion#subscribe", () => {
     const err = (await promise.catch((e) => e)) as NamiFusionError;
     expect(err).not.toBeInstanceOf(TaskFailedError);
     expect(err.message).toMatch(/timed out/i);
+    expect(err.detail).toEqual({ task_uuid: "t1", timeout_ms: 5000 });
   });
 
   it("defaults pollIntervalMs to 2000 and subscribe timeoutMs to 1_800_000 when omitted", async () => {

@@ -31,7 +31,8 @@ const task = await client.subscribe(modelId, {
 ```python
 from namifusion import NamiFusion
 
-client = NamiFusion(api_key="sk-...")
+# Reads the API key from the NAMIFUSION_API_KEY environment variable.
+client = NamiFusion()
 
 task = client.subscribe(model_id, input={...})
 ```

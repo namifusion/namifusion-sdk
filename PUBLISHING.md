@@ -16,14 +16,19 @@ for the first release.
    npm test
    npm run build
    ```
-4. Publish (scoped packages default to private, so `--access public` is
+4. Verify the published file listing before publishing — `npm pack
+   --dry-run` and confirm the file list includes `LICENSE` (alongside
+   `dist/` and `README.md`; npm includes `LICENSE` automatically without
+   needing an entry in `package.json`'s `files` array).
+5. Publish (scoped packages default to private, so `--access public` is
    required the first time):
    ```sh
    npm publish --access public
    ```
-5. For subsequent releases: bump `version` in `packages/typescript/package.json`,
-   repeat steps 3–4 (omit `--access public` once the package is public — it's
-   harmless to keep passing it either way).
+6. For subsequent releases: bump `version` in `packages/typescript/package.json`
+   **and** `SDK_VERSION` in `packages/typescript/src/client.ts` (keep the two in
+   sync), repeat steps 3–5 (omit `--access public` once the package is public —
+   it's harmless to keep passing it either way).
 
 ## PyPI (`namifusion`)
 
@@ -38,17 +43,22 @@ for the first release.
    ```
    or export `TWINE_USERNAME=__token__` / `TWINE_PASSWORD=pypi-...` in the
    environment instead.
-3. From `packages/python/`, build the sdist + wheel:
+3. From `packages/python/`, run the tests, then build the sdist + wheel:
    ```sh
    python -m pip install --upgrade build twine
+   pytest
    python -m build
    ```
-4. Upload:
+4. Verify the built artifacts before uploading: `twine check dist/*` (checks
+   package metadata and that the README renders correctly on PyPI).
+5. Upload:
    ```sh
    twine upload dist/*
    ```
-5. For subsequent releases: bump `version` in `packages/python/pyproject.toml`,
-   clear `dist/` and repeat steps 3–4.
+6. For subsequent releases: bump `version` in `packages/python/pyproject.toml`,
+   `__version__` in `packages/python/src/namifusion/__init__.py`, **and**
+   `_SDK_VERSION` in `packages/python/src/namifusion/_client.py` (keep all
+   three in sync), clear `dist/` and repeat steps 3–5.
 
 ## First-release checklist
 
