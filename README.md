@@ -2,6 +2,8 @@
 
 Official SDKs for the [NamiFusion](https://www.namifusion.com) AI model marketplace API.
 
+Repository: https://github.com/namifusion/namifusion-sdk
+
 ## Packages
 
 | Package | Language | Install |
@@ -16,9 +18,8 @@ Official SDKs for the [NamiFusion](https://www.namifusion.com) AI model marketpl
 ```ts
 import { NamiFusion } from "@namifusion/client";
 
-const client = new NamiFusion({
-  apiKey: process.env.NAMIFUSION_API_KEY!,
-});
+// Reads the API key from the NAMIFUSION_API_KEY environment variable.
+const client = new NamiFusion();
 
 const task = await client.subscribe(modelId, {
   input: { /* model-specific input */ },
