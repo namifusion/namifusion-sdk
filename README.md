@@ -2,7 +2,7 @@
 
 Official SDKs for the [NamiFusion](https://www.namifusion.com) AI model marketplace API.
 
-Repository: https://github.com/namifusion/namifusion-sdk
+Repository: https://github.com/shanweimu/namifusion-sdk
 
 ## Packages
 
