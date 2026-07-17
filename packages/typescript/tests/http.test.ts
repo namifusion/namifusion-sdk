@@ -244,6 +244,32 @@ describe("http.request", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("aborts an in-flight fetch immediately when opts.signal fires mid-flight (never-resolving fetch)", async () => {
+    const controller = new AbortController();
+    const abortReason = new Error("caller gave up mid-flight");
+
+    // Never resolves on its own — the only way this settles is via the
+    // AbortSignal forwarded into `init.signal`, mirroring how a real
+    // fetch()/undici implementation rejects with `signal.reason` once its
+    // controller aborts.
+    const fetchMock = vi.fn((_url: string, init: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        const signal = init.signal as AbortSignal;
+        signal.addEventListener("abort", () => reject(signal.reason));
+      });
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const promise = request(baseOpts({ signal: controller.signal }));
+    const assertion = expect(promise).rejects.toBe(abortReason);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    controller.abort(abortReason);
+    await assertion;
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("interrupts a pending retry backoff immediately when opts.signal aborts mid-wait", async () => {
     vi.useFakeTimers();
     // Pin the jitter so the 503 backoff delay for attempt 0 is exactly 500ms

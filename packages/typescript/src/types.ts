@@ -67,3 +67,24 @@ export interface SubscribeOptions extends RunOptions {
   onUpdate?: (task: Task) => void;
   signal?: AbortSignal;
 }
+
+/** Query params for `client.listTasks(params)`, mirroring be_mono's
+ * API-key `GET /run/tasks` endpoint (services/app_marketplace/api/v1/
+ * endpoints/run.py `list_tasks`): `skip`/`limit` for pagination, optional
+ * `model_id`/`status` filters. `status` is forwarded as-is to the server's
+ * internal status filter (not restricted to the 5 public TaskStatus
+ * values), so it's typed as a plain string rather than `TaskStatus`. */
+export interface ListTasksParams {
+  /** Defaults to 0 server-side. */
+  skip?: number;
+  /** Defaults to 20 server-side. */
+  limit?: number;
+  modelId?: string;
+  status?: string;
+}
+
+/** Response of `GET /run/tasks`. */
+export interface ListTasksResult {
+  total: number;
+  items: Task[];
+}
