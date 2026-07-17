@@ -468,6 +468,132 @@ describe("NamiFusion#subscribe", () => {
     expect(onUpdate).not.toHaveBeenCalled();
     expect(fetchMock).toHaveBeenCalledTimes(2); // no further polls after the abort
   });
+
+  it("threads signal into the in-flight getTask fetch so an abort rejects it immediately (passthrough)", async () => {
+    vi.useFakeTimers();
+
+    const abortReason = new Error("caller cancelled");
+    let capturedSignal: AbortSignal | undefined;
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, { task_uuid: "t1", status: "pending" }))
+      .mockImplementationOnce((_url: string, init: RequestInit) => {
+        capturedSignal = init.signal as AbortSignal;
+        // Never resolves on its own — the only way this fetch settles is via
+        // the AbortSignal threaded down from subscribe's `signal`, proving
+        // the signal reaches the HTTP layer (not just the polling gap).
+        return new Promise((_resolve, reject) => {
+          capturedSignal!.addEventListener("abort", () => reject(capturedSignal!.reason));
+        });
+      });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const controller = new AbortController();
+    const client = new NamiFusion({ apiKey: API_KEY, baseUrl: BASE_URL });
+    const promise = client.subscribe("acme/model-x", { input: {}, signal: controller.signal });
+    const assertion = expect(promise).rejects.toBe(abortReason);
+
+    await vi.advanceTimersByTimeAsync(2000); // first poll sleep elapses → getTask fetch in flight
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(capturedSignal).toBeDefined();
+
+    controller.abort(abortReason);
+    await assertion;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2); // aborted in flight, no further poll issued
+  });
+
+  it("converges each poll's HTTP timeout to the remaining budget (hard deadline; no request outlives it)", async () => {
+    vi.useFakeTimers();
+
+    let getTaskSignal: AbortSignal | undefined;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, { task_uuid: "t1", status: "pending" }))
+      .mockImplementationOnce((_url: string, init: RequestInit) => {
+        getTaskSignal = init.signal as AbortSignal;
+        // Hangs until its (converged-timeout) signal aborts it.
+        return new Promise((_resolve, reject) => {
+          getTaskSignal!.addEventListener("abort", () => reject(getTaskSignal!.reason));
+        });
+      });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    // Per-request client timeout (60s) is far larger than the 3s subscribe
+    // budget, so the converged per-request timeout — not the client timeout —
+    // must bound the in-flight poll. maxRetries:0 so the converged timeout
+    // surfaces immediately instead of being retried.
+    const client = new NamiFusion({
+      apiKey: API_KEY,
+      baseUrl: BASE_URL,
+      maxRetries: 0,
+      timeoutMs: 60_000,
+    });
+    const promise = client.subscribe("acme/model-x", {
+      input: {},
+      pollIntervalMs: 1000,
+      timeoutMs: 3000,
+    });
+    const assertion = expect(promise).rejects.toMatchObject({ name: "TimeoutError" });
+
+    // run submitted at t=0; first sleep(1000) elapses → getTask issued at
+    // t=1000 with a converged timeout of min(60000, 3000-1000)=2000ms.
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // Still in flight just before the deadline (would still be pending at
+    // t=61000 if the client's 60s timeout applied instead of the budget).
+    await vi.advanceTimersByTimeAsync(1999);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    // At t=3000 (the hard deadline) the converged timeout fires.
+    await vi.advanceTimersByTimeAsync(1);
+    await assertion;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2); // no new request initiated past the budget
+  });
+});
+
+describe("malformed 2xx responses", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  function htmlResponse(): Response {
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "text/html" }),
+      text: async () => "<html><body>maintenance</body></html>",
+    } as unknown as Response;
+  }
+
+  it("throws NamiFusionError (not an undefined-field crash) when getTask gets a 200 HTML body", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(htmlResponse());
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const client = new NamiFusion({ apiKey: API_KEY, baseUrl: BASE_URL });
+
+    const err = (await client.getTask("t1").catch((e) => e)) as NamiFusionError;
+    expect(err).toBeInstanceOf(NamiFusionError);
+    expect(err.detail).toBe("<html><body>maintenance</body></html>");
+  });
+
+  it("throws NamiFusionError when run gets a 200 HTML body", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(htmlResponse());
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const client = new NamiFusion({ apiKey: API_KEY, baseUrl: BASE_URL });
+
+    await expect(client.run("acme/model-x", { input: {} })).rejects.toBeInstanceOf(NamiFusionError);
+  });
+
+  it("throws NamiFusionError when a 200 JSON object is missing required keys (task_uuid/status)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { estimated_time: 5 }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const client = new NamiFusion({ apiKey: API_KEY, baseUrl: BASE_URL });
+
+    const err = (await client.run("acme/model-x", { input: {} }).catch((e) => e)) as NamiFusionError;
+    expect(err).toBeInstanceOf(NamiFusionError);
+    expect(err.message).toMatch(/task_uuid/);
+  });
 });
 
 describe("toDataUrl", () => {

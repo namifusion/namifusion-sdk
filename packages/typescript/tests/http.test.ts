@@ -216,6 +216,56 @@ describe("http.request", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("retries when reading the response body (text()) rejects with a network error, then succeeds", async () => {
+    vi.useFakeTimers();
+    const bodyReadError = new TypeError("terminated");
+    // A 2xx response whose body read fails mid-stream — response.text()
+    // rejecting is a network error just like fetch() rejecting, so it must
+    // go through the same retry path rather than surfacing immediately.
+    const failingBodyResponse = {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text: async () => {
+        throw bodyReadError;
+      },
+    } as unknown as Response;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(failingBodyResponse)
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const promise = request(baseOpts({ maxRetries: 1 }));
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result).toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-throws the raw body-read error once retries are exhausted", async () => {
+    vi.useFakeTimers();
+    const bodyReadError = new TypeError("terminated");
+    const failingBodyResponse = {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      text: async () => {
+        throw bodyReadError;
+      },
+    } as unknown as Response;
+    const fetchMock = vi.fn().mockResolvedValue(failingBodyResponse);
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const promise = request(baseOpts({ maxRetries: 1 }));
+    const assertion = expect(promise).rejects.toBe(bodyReadError);
+    await vi.runAllTimersAsync();
+    await assertion;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects immediately with the raw network error once retries are exhausted", async () => {
     vi.useFakeTimers();
     const networkError = new TypeError("fetch failed");
@@ -320,12 +370,13 @@ describe("computeBackoffDelayMs", () => {
 });
 
 describe("parseRetryAfterSeconds", () => {
-  it("caps a Retry-After above 30s down to 30", () => {
-    expect(parseRetryAfterSeconds(new Headers({ "Retry-After": "100" }))).toBe(30);
+  it("caps a Retry-After above 60s down to 60", () => {
+    expect(parseRetryAfterSeconds(new Headers({ "Retry-After": "100" }))).toBe(60);
   });
 
-  it("passes through values at or below the 30s cap unchanged", () => {
-    expect(parseRetryAfterSeconds(new Headers({ "Retry-After": "30" }))).toBe(30);
+  it("passes through values at or below the 60s cap unchanged", () => {
+    expect(parseRetryAfterSeconds(new Headers({ "Retry-After": "60" }))).toBe(60);
+    expect(parseRetryAfterSeconds(new Headers({ "Retry-After": "45" }))).toBe(45);
     expect(parseRetryAfterSeconds(new Headers({ "Retry-After": "5" }))).toBe(5);
   });
 

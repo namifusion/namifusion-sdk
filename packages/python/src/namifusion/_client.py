@@ -144,6 +144,21 @@ def _sleep_duration(interval: float, elapsed: float, timeout: float) -> float:
     return min(interval, timeout - elapsed)
 
 
+#: Floor (seconds) for a converged per-request timeout — mirrors client.ts's
+#: 1ms floor (`Math.max(1, ...)`), keeping httpx from getting a zero/negative
+#: timeout once the subscribe deadline is spent.
+_MIN_REQUEST_TIMEOUT = 0.001
+
+
+def _request_timeout(client_timeout: float, deadline: float, now: float) -> float:
+    """Converges a single request's timeout to
+    max(1ms, min(client timeout, remaining budget)) so subscribe()'s total
+    timeout acts as a hard deadline — a hung run()/get_task() can't block
+    past it. Mirrors client.ts's `perRequestTimeoutMs()`.
+    """
+    return max(_MIN_REQUEST_TIMEOUT, min(client_timeout, deadline - now))
+
+
 def _subscribe_timeout_error(task_uuid: str, timeout: float) -> NamiFusionError:
     return NamiFusionError(
         f"subscribe() timed out after {timeout}s waiting for task {task_uuid} "
@@ -191,13 +206,17 @@ class NamiFusion:
         input: Mapping[str, Any],
         webhook_url: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        _timeout: Optional[float] = None,
     ) -> RunResult:
+        # `_timeout` is an internal test/subscribe seam (not in the public
+        # contract signature): subscribe() passes its hard-deadline-converged
+        # per-request budget here so a hung submit can't overrun the total.
         key = _resolve_idempotency_key(idempotency_key)
         opts = RequestOptions(
             method="POST",
             url=_run_url(self._base_url, model_id),
             api_key=self._api_key,
-            timeout=self._timeout,
+            timeout=_timeout if _timeout is not None else self._timeout,
             max_retries=self._max_retries,
             user_agent=_USER_AGENT,
             body=_run_body(input, webhook_url),
@@ -206,12 +225,12 @@ class NamiFusion:
         data = self._request(opts)
         return RunResult.from_dict(data)
 
-    def get_task(self, task_uuid: str) -> Task:
+    def get_task(self, task_uuid: str, *, _timeout: Optional[float] = None) -> Task:
         opts = RequestOptions(
             method="GET",
             url=_task_url(self._base_url, task_uuid),
             api_key=self._api_key,
-            timeout=self._timeout,
+            timeout=_timeout if _timeout is not None else self._timeout,
             max_retries=self._max_retries,
             user_agent=_USER_AGENT,
         )
@@ -248,10 +267,20 @@ class NamiFusion:
         timeout: float = DEFAULT_SUBSCRIBE_TIMEOUT,
         on_update: Optional[Callable[[Task], None]] = None,
     ) -> Task:
-        submitted = self.run(
-            model_id, input=input, webhook_url=webhook_url, idempotency_key=idempotency_key
-        )
+        # Hard deadline: the clock starts *before* the submit, so the whole
+        # call — first run() included — is bounded by `timeout`. Each internal
+        # request's own timeout is converged to the remaining budget so a hung
+        # run()/get_task() can't block past the deadline (the elapsed check
+        # below only fires between requests, not during one).
         start = self._now()
+        deadline = start + timeout
+        submitted = self.run(
+            model_id,
+            input=input,
+            webhook_url=webhook_url,
+            idempotency_key=idempotency_key,
+            _timeout=_request_timeout(self._timeout, deadline, self._now()),
+        )
         interval = poll_interval
 
         while True:
@@ -261,7 +290,10 @@ class NamiFusion:
 
             self._sleep(_sleep_duration(interval, elapsed, timeout))
 
-            task = self.get_task(submitted.task_uuid)
+            task = self.get_task(
+                submitted.task_uuid,
+                _timeout=_request_timeout(self._timeout, deadline, self._now()),
+            )
             if on_update is not None:
                 on_update(task)
 
@@ -309,13 +341,17 @@ class AsyncNamiFusion:
         input: Mapping[str, Any],
         webhook_url: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        _timeout: Optional[float] = None,
     ) -> RunResult:
+        # `_timeout` is an internal test/subscribe seam (not in the public
+        # contract signature): subscribe() passes its hard-deadline-converged
+        # per-request budget here so a hung submit can't overrun the total.
         key = _resolve_idempotency_key(idempotency_key)
         opts = RequestOptions(
             method="POST",
             url=_run_url(self._base_url, model_id),
             api_key=self._api_key,
-            timeout=self._timeout,
+            timeout=_timeout if _timeout is not None else self._timeout,
             max_retries=self._max_retries,
             user_agent=_USER_AGENT,
             body=_run_body(input, webhook_url),
@@ -324,12 +360,12 @@ class AsyncNamiFusion:
         data = await self._request(opts)
         return RunResult.from_dict(data)
 
-    async def get_task(self, task_uuid: str) -> Task:
+    async def get_task(self, task_uuid: str, *, _timeout: Optional[float] = None) -> Task:
         opts = RequestOptions(
             method="GET",
             url=_task_url(self._base_url, task_uuid),
             api_key=self._api_key,
-            timeout=self._timeout,
+            timeout=_timeout if _timeout is not None else self._timeout,
             max_retries=self._max_retries,
             user_agent=_USER_AGENT,
         )
@@ -366,10 +402,20 @@ class AsyncNamiFusion:
         timeout: float = DEFAULT_SUBSCRIBE_TIMEOUT,
         on_update: Optional[Callable[[Task], None]] = None,
     ) -> Task:
-        submitted = await self.run(
-            model_id, input=input, webhook_url=webhook_url, idempotency_key=idempotency_key
-        )
+        # Hard deadline: the clock starts *before* the submit, so the whole
+        # call — first run() included — is bounded by `timeout`. Each internal
+        # request's own timeout is converged to the remaining budget so a hung
+        # run()/get_task() can't block past the deadline (the elapsed check
+        # below only fires between requests, not during one).
         start = self._now()
+        deadline = start + timeout
+        submitted = await self.run(
+            model_id,
+            input=input,
+            webhook_url=webhook_url,
+            idempotency_key=idempotency_key,
+            _timeout=_request_timeout(self._timeout, deadline, self._now()),
+        )
         interval = poll_interval
 
         while True:
@@ -383,7 +429,10 @@ class AsyncNamiFusion:
             # below.
             await self._sleep(_sleep_duration(interval, elapsed, timeout))
 
-            task = await self.get_task(submitted.task_uuid)
+            task = await self.get_task(
+                submitted.task_uuid,
+                _timeout=_request_timeout(self._timeout, deadline, self._now()),
+            )
             if on_update is not None:
                 on_update(task)
 

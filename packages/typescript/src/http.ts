@@ -86,7 +86,7 @@ async function readJsonBody(response: Response): Promise<unknown> {
   }
 }
 
-/** ms to wait per the `Retry-After` header (seconds, capped at 30s), or
+/** ms to wait per the `Retry-After` header (seconds, capped at 60s), or
  * `undefined` when the header is absent/unparseable (e.g. the monthly-quota
  * flavor of 429, which carries no Retry-After). */
 function retryAfterDelayMs(headers: Headers): number | undefined {
@@ -99,13 +99,15 @@ function retryAfterDelayMs(headers: Headers): number | undefined {
  *
  * Retries (network errors, 429, 502, 503, 504) use exponential backoff
  * (see {@link computeBackoffDelayMs}), except a 429 with a `Retry-After`
- * header waits that many seconds (capped at 30s) instead. Any other 4xx
+ * header waits that many seconds (capped at 60s) instead. Any other 4xx
  * throws immediately via `errorFromResponse` without retrying.
  *
- * Network errors (fetch rejecting — including timeout-induced aborts) are
- * retried the same way; once retries are exhausted the *original* error is
- * re-thrown unchanged (no NamiFusionError wrapping) since it isn't an HTTP
- * response to map. An external `signal` abort is never retried — it
+ * Network errors are retried the same way — this covers both `fetch`
+ * rejecting (including timeout-induced aborts) *and* a failure while
+ * reading the response body (`response.text()` rejecting mid-stream).
+ * Once retries are exhausted the *original* error is re-thrown unchanged
+ * (no NamiFusionError wrapping) since it isn't an HTTP response to map. An
+ * external `signal` abort is never retried — it
  * propagates immediately, including before the first attempt (no `fetch`
  * call is made at all) and while a retry backoff is pending.
  */
@@ -136,6 +138,7 @@ export async function request<T>(opts: RequestOptions): Promise<T> {
 
     try {
       let response: Response;
+      let parsedBody: unknown;
       try {
         response = await fetch(opts.url, {
           method: opts.method,
@@ -143,6 +146,12 @@ export async function request<T>(opts: RequestOptions): Promise<T> {
           body: bodyText,
           signal: controller.signal,
         });
+        // Read the body inside the same try/catch as `fetch` so a body-read
+        // network error (`response.text()` rejecting mid-stream) is treated
+        // exactly like a `fetch` rejection: retried, then re-thrown raw once
+        // retries are exhausted. Reading once here also serves both the ok
+        // and error branches below.
+        parsedBody = await readJsonBody(response);
       } catch (err) {
         if (opts.signal?.aborted || attempt >= opts.maxRetries) {
           throw err;
@@ -153,10 +162,8 @@ export async function request<T>(opts: RequestOptions): Promise<T> {
       }
 
       if (response.ok) {
-        return (await readJsonBody(response)) as T;
+        return parsedBody as T;
       }
-
-      const parsedBody = await readJsonBody(response);
 
       if (RETRYABLE_STATUSES.has(response.status) && attempt < opts.maxRetries) {
         const delay =

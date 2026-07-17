@@ -149,15 +149,19 @@ function parseErrorBody(body: unknown): ParsedErrorBody {
 }
 
 /** Parses the `Retry-After` header as a whole number of seconds, capped at
- * 30s. Returns `undefined` when absent or unparseable (e.g. the
+ * 60s. Returns `undefined` when absent or unparseable (e.g. the
  * monthly-quota flavor of 429, which carries no Retry-After). Exported so
- * http.ts's retry loop can reuse the same parsing/cap logic. */
+ * http.ts's retry loop can reuse the same parsing/cap logic.
+ *
+ * The 60s cap matches be_mono's 60s rate-limit window (2026-07-17 holistic
+ * review): a shorter 30s cap would retry back inside the same window and
+ * necessarily eat a second 429. */
 export function parseRetryAfterSeconds(headers: Headers): number | undefined {
   const raw = headers.get("retry-after");
   if (!raw) return undefined;
   const seconds = Number(raw);
   if (!Number.isFinite(seconds) || seconds < 0) return undefined;
-  return Math.min(seconds, 30);
+  return Math.min(seconds, 60);
 }
 
 /** Maps an HTTP error response to the corresponding NamiFusionError

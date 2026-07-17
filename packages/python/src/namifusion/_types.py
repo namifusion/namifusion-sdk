@@ -20,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Mapping, Optional
 
+from ._errors import NamiFusionError
+
 #: Public task lifecycle. Internal ``polling``/``waiting_callback`` states
 #: are mapped to ``processing`` server-side before reaching the client.
 #: Kept as a plain ``str`` alias (not ``Literal``) since dataclasses don't
@@ -36,7 +38,19 @@ def _from_dict(cls, data: Mapping[str, Any]):
     This is the "服务端多余字段容错" tolerance the contract asks for: the
     API is free to add response fields over time without breaking older
     SDK versions still in the field.
+
+    A 2xx body that isn't a JSON object at all (e.g. a gateway returning
+    ``200 text/html``, which ``_transport`` hands us back as a raw string)
+    raises ``NamiFusionError`` — with the raw body on ``.detail`` — rather
+    than a bare ``AttributeError`` from ``data.items()``. Mirrors client.ts's
+    response-shape check.
     """
+    if not isinstance(data, Mapping):
+        raise NamiFusionError(
+            f"Malformed API response: expected a JSON object for {cls.__name__}, "
+            f"got {type(data).__name__}",
+            detail=data,
+        )
     known = {f.name for f in fields(cls)}
     kwargs = {key: value for key, value in data.items() if key in known}
     return cls(**kwargs)

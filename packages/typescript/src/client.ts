@@ -92,6 +92,49 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** Internal per-call overrides `subscribe()` threads into its `run()` /
+ * `getTask()` calls: the caller's `AbortSignal` (so an abort interrupts the
+ * in-flight HTTP request, not just the polling gap) and a
+ * hard-deadline-converged per-request timeout. Not part of the public API —
+ * omit it (every public call site does) and each method behaves exactly as
+ * its contract signature promises. */
+interface RequestOverrides {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
+/**
+ * Validates that a 2xx response body parsed into the JSON object the API
+ * contract promises, throwing a `NamiFusionError` (carrying the raw body on
+ * `.detail`) when it didn't. A misbehaving gateway returning `200
+ * text/html`, or an object missing fields every response of this kind must
+ * have, would otherwise slip through as a malformed `RunResult`/`Task` and
+ * only surface later as an `undefined` `.task_uuid`. Catch it at the
+ * boundary instead. Mirrors _types.py's `_from_dict` non-Mapping guard.
+ */
+function assertObjectResponse(
+  body: unknown,
+  context: string,
+  requiredKeys: readonly string[],
+): void {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    throw new NamiFusionError(
+      `Malformed ${context} response: expected a JSON object from the NamiFusion API`,
+      0,
+      { detail: body },
+    );
+  }
+  const record = body as Record<string, unknown>;
+  const missing = requiredKeys.filter((key) => record[key] === undefined);
+  if (missing.length > 0) {
+    throw new NamiFusionError(
+      `Malformed ${context} response: missing expected field(s) ${missing.join(", ")}`,
+      0,
+      { detail: body },
+    );
+  }
+}
+
 /**
  * Client for the NamiFusion AI model marketplace API.
  *
@@ -133,35 +176,45 @@ export class NamiFusion {
    * request (http.ts's `request()` builds the headers object once and
    * reuses it across retries), so retrying a POST /run is always safe.
    */
-  async run(modelId: string, options: RunOptions): Promise<RunResult> {
+  async run(
+    modelId: string,
+    options: RunOptions,
+    overrides: RequestOverrides = {},
+  ): Promise<RunResult> {
     const idempotencyKey = options.idempotencyKey ?? generateIdempotencyKey();
     const body: Record<string, unknown> = { input: options.input };
     if (options.webhookUrl !== undefined) {
       body.webhook_url = options.webhookUrl;
     }
 
-    return request<RunResult>({
+    const result = await request<RunResult>({
       method: "POST",
       url: `${this.baseUrl}/run/${modelId}`,
       apiKey: this.apiKey,
       body,
       headers: { "Idempotency-Key": idempotencyKey },
-      timeoutMs: this.timeoutMs,
+      timeoutMs: overrides.timeoutMs ?? this.timeoutMs,
       maxRetries: this.maxRetries,
       userAgent: USER_AGENT,
+      signal: overrides.signal,
     });
+    assertObjectResponse(result, "run", ["task_uuid", "status"]);
+    return result;
   }
 
   /** Fetches the current status of a previously submitted task. */
-  async getTask(taskUuid: string): Promise<Task> {
-    return request<Task>({
+  async getTask(taskUuid: string, overrides: RequestOverrides = {}): Promise<Task> {
+    const result = await request<Task>({
       method: "GET",
       url: `${this.baseUrl}/run/tasks/${taskUuid}`,
       apiKey: this.apiKey,
-      timeoutMs: this.timeoutMs,
+      timeoutMs: overrides.timeoutMs ?? this.timeoutMs,
       maxRetries: this.maxRetries,
       userAgent: USER_AGENT,
+      signal: overrides.signal,
     });
+    assertObjectResponse(result, "getTask", ["task_uuid", "status"]);
+    return result;
   }
 
   /**
@@ -179,7 +232,7 @@ export class NamiFusion {
     const qs = query.toString();
     const url = `${this.baseUrl}/run/tasks${qs ? `?${qs}` : ""}`;
 
-    return request<ListTasksResult>({
+    const result = await request<ListTasksResult>({
       method: "GET",
       url,
       apiKey: this.apiKey,
@@ -187,6 +240,8 @@ export class NamiFusion {
       maxRetries: this.maxRetries,
       userAgent: USER_AGENT,
     });
+    assertObjectResponse(result, "listTasks", ["total", "items"]);
+    return result;
   }
 
   /**
@@ -204,8 +259,11 @@ export class NamiFusion {
    * the base class directly rather than inventing a new one.
    *
    * `onUpdate` fires once per poll (not for the initial `run()` submission
-   * response, which is a `RunResult`, not a `Task`). `signal`, if given,
-   * stops polling and rejects with `signal.reason` as soon as it fires.
+   * response, which is a `RunResult`, not a `Task`). `signal`, if given, is
+   * threaded into every internal `run()`/`getTask()` HTTP request, so an
+   * abort interrupts a request already in flight (not just the polling gap)
+   * and rejects with `signal.reason` as soon as it fires. `timeoutMs` is a
+   * hard deadline measured from entry (see below).
    */
   async subscribe(modelId: string, options: SubscribeOptions): Promise<Task> {
     const {
@@ -220,8 +278,20 @@ export class NamiFusion {
       throw signal.reason ?? new Error("Aborted");
     }
 
-    const submitted = await this.run(modelId, runOptions);
+    // Hard deadline: the clock starts *before* the initial submit, so the
+    // whole subscribe() call — first run() included — is bounded by
+    // `timeoutMs`. Each internal HTTP request's own timeout is converged to
+    // max(1ms, min(client timeout, remaining budget)) so a single hung
+    // request can't block past the deadline (the polling-gap check below
+    // only fires between requests, not during one).
     const startedAt = Date.now();
+    const perRequestTimeoutMs = (): number =>
+      Math.max(1, Math.min(this.timeoutMs, startedAt + timeoutMs - Date.now()));
+
+    const submitted = await this.run(modelId, runOptions, {
+      signal,
+      timeoutMs: perRequestTimeoutMs(),
+    });
     let interval = pollIntervalMs;
 
     for (;;) {
@@ -236,7 +306,10 @@ export class NamiFusion {
 
       await sleep(Math.min(interval, timeoutMs - elapsed), signal);
 
-      const task = await this.getTask(submitted.task_uuid);
+      const task = await this.getTask(submitted.task_uuid, {
+        signal,
+        timeoutMs: perRequestTimeoutMs(),
+      });
       if (signal?.aborted) {
         throw signal.reason ?? new Error("Aborted");
       }

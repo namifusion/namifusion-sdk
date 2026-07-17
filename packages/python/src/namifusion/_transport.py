@@ -3,7 +3,7 @@
 Mirrors packages/typescript/src/http.ts's `request()`: retries network
 errors and 429/502/503/504 responses with exponential backoff (base
 0.5s, doubling per attempt, capped at 8s, +-20% jitter), except a 429
-carrying a `Retry-After` header waits that many seconds (capped at 30s,
+carrying a `Retry-After` header waits that many seconds (capped at 60s,
 via `_errors.parse_retry_after_seconds`) instead. Any other 4xx raises
 immediately via `error_from_response` without retrying.
 
@@ -80,7 +80,7 @@ def _backoff_delay(
     """Computes the delay (seconds) before retry attempt `attempt`
     (0-indexed: 0 = delay before the 1st retry).
 
-    When `retry_after` is given (a 429's parsed, already-capped-at-30s
+    When `retry_after` is given (a 429's parsed, already-capped-at-60s
     Retry-After value) it's used verbatim, no jitter applied. Otherwise:
     base 0.5s, doubling per attempt, capped at 8s, with up to +-20%
     jitter so concurrent clients don't retry in lockstep.

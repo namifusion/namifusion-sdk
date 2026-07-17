@@ -180,7 +180,7 @@ class TestCoreRetrySemantics:
         assert len(calls) == 3
         assert exc_info.value.retry_after == 3
 
-    async def test_429_retry_after_capped_at_30(self, is_async):
+    async def test_429_retry_after_capped_at_60(self, is_async):
         calls = []
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -192,8 +192,8 @@ class TestCoreRetrySemantics:
         with pytest.raises(RateLimitError) as exc_info:
             await run_request(is_async, base_opts(max_retries=1), transport, sleep_calls)
 
-        assert exc_info.value.retry_after == 30
-        assert sleep_calls == [30]
+        assert exc_info.value.retry_after == 60
+        assert sleep_calls == [60]
 
     async def test_5xx_exhausts_retries_and_raises_server_error(self, is_async):
         calls = []

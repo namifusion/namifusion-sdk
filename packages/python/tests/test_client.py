@@ -436,3 +436,63 @@ class TestSubscribe:
             "input": {},
             "webhook_url": "https://example.com/hook",
         }
+
+
+class TestSubscribeHardDeadline:
+    def test_request_timeout_helper_converges(self):
+        from namifusion._client import _request_timeout
+
+        assert _request_timeout(60.0, 5.0, 0.0) == pytest.approx(5.0)  # full budget
+        assert _request_timeout(60.0, 5.0, 2.0) == pytest.approx(3.0)  # remaining budget
+        assert _request_timeout(2.0, 100.0, 0.0) == pytest.approx(2.0)  # client cap wins
+        assert _request_timeout(60.0, 5.0, 5.0) == pytest.approx(0.001)  # floored at deadline
+        assert _request_timeout(60.0, 5.0, 9.0) == pytest.approx(0.001)  # floored past deadline
+
+    def test_converges_each_request_timeout_to_remaining_budget(self):
+        # httpx records a request's timeout in request.extensions["timeout"];
+        # asserting on it proves each internal run()/get_task() ran with a
+        # budget-converged timeout (5.0 -> 3.0 -> 0.001), never the flat 60s
+        # client timeout — i.e. subscribe's total timeout is a hard deadline.
+        processing = make_task(status="processing")
+        transport, calls = sequenced_transport(
+            [json_response(200, {"task_uuid": "t1", "status": "pending"})]
+            + [json_response(200, processing) for _ in range(5)]
+        )
+        clock = FakeClock()
+        client = NamiFusion(
+            api_key=API_KEY,
+            base_url=BASE_URL,
+            timeout=60.0,
+            _transport=transport,
+            _sleep=clock.sleep,
+            _now=clock.now,
+        )
+
+        with pytest.raises(NamiFusionError):
+            client.subscribe("acme/model-x", input={}, poll_interval=2.0, timeout=5.0)
+
+        def read_timeout(req):
+            return req.extensions["timeout"]["read"]
+
+        assert len(calls) == 3  # 1 run + 2 polls fit the 5.0s budget
+        assert read_timeout(calls[0]) == pytest.approx(5.0)  # submit at t=0
+        assert read_timeout(calls[1]) == pytest.approx(3.0)  # poll at t=2.0
+        assert read_timeout(calls[2]) == pytest.approx(0.001)  # poll at t=5.0, floored
+
+
+class TestMalformedResponses:
+    def test_get_task_on_200_html_raises_namifusion_error(self):
+        # A gateway 200 text/html reaches Task.from_dict as a raw string;
+        # it must surface as NamiFusionError (body on .detail), not a bare
+        # AttributeError.
+        html = "<html><body>maintenance</body></html>"
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=html, headers={"content-type": "text/html"})
+
+        transport = httpx.MockTransport(handler)
+        client = NamiFusion(api_key=API_KEY, base_url=BASE_URL, _transport=transport)
+
+        with pytest.raises(NamiFusionError) as exc_info:
+            client.get_task("t1")
+        assert exc_info.value.detail == html

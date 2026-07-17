@@ -144,13 +144,29 @@ class TestErrorFromResponse:
         assert str(err) == "42"
         assert err.detail == 42
 
+    def test_422_list_detail_is_json_serialized_not_python_repr(self):
+        # FastAPI 422 validation errors arrive as a *list* of error objects.
+        # The message must be JSON (matching TS's JSON.stringify(detail)),
+        # not Python's list repr (single quotes, tuples, etc.).
+        import json
+
+        detail = [
+            {"loc": ["body", "prompt"], "msg": "field required", "type": "value_error.missing"}
+        ]
+        err = error_from_response(422, {"detail": detail}, httpx.Headers())
+        assert isinstance(err, InvalidRequestError)
+        assert str(err) == json.dumps(detail)
+        assert "'loc'" not in str(err)  # not a Python repr
+        assert err.detail == detail
+
 
 class TestParseRetryAfterSeconds:
-    def test_caps_above_30_down_to_30(self):
-        assert parse_retry_after_seconds(httpx.Headers({"Retry-After": "100"})) == 30
+    def test_caps_above_60_down_to_60(self):
+        assert parse_retry_after_seconds(httpx.Headers({"Retry-After": "100"})) == 60
 
     def test_passes_through_values_at_or_below_cap(self):
-        assert parse_retry_after_seconds(httpx.Headers({"Retry-After": "30"})) == 30
+        assert parse_retry_after_seconds(httpx.Headers({"Retry-After": "60"})) == 60
+        assert parse_retry_after_seconds(httpx.Headers({"Retry-After": "45"})) == 45
         assert parse_retry_after_seconds(httpx.Headers({"Retry-After": "5"})) == 5
 
     def test_absent_header_returns_none(self):

@@ -245,6 +245,36 @@ class TestSubscribeAsync:
         assert err.detail == {"task_uuid": "t1", "timeout": 5.0}
         assert len(calls) == 3
 
+    async def test_converges_each_request_timeout_to_remaining_budget(self):
+        # Async mirror of the sync hard-deadline test: each internal request
+        # runs with a budget-converged timeout (5.0 -> 3.0 -> 0.001), never
+        # the flat 60s client timeout.
+        processing = make_task(status="processing")
+        transport, calls = sequenced_transport(
+            [json_response(200, {"task_uuid": "t1", "status": "pending"})]
+            + [json_response(200, processing) for _ in range(5)]
+        )
+        clock = FakeAsyncClock()
+        client = AsyncNamiFusion(
+            api_key=API_KEY,
+            base_url=BASE_URL,
+            timeout=60.0,
+            _transport=transport,
+            _sleep=clock.sleep,
+            _now=clock.now,
+        )
+
+        with pytest.raises(NamiFusionError):
+            await client.subscribe("acme/model-x", input={}, poll_interval=2.0, timeout=5.0)
+
+        def read_timeout(req):
+            return req.extensions["timeout"]["read"]
+
+        assert len(calls) == 3
+        assert read_timeout(calls[0]) == pytest.approx(5.0)
+        assert read_timeout(calls[1]) == pytest.approx(3.0)
+        assert read_timeout(calls[2]) == pytest.approx(0.001)
+
     async def test_cancellation_propagates_without_being_swallowed(self):
         # Regression guard for the async-only semantic the brief calls
         # out: an external asyncio.Task.cancel() firing while subscribe()

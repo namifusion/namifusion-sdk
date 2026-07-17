@@ -6,6 +6,7 @@ server-side fields.
 
 import pytest
 
+from namifusion._errors import NamiFusionError
 from namifusion._types import ListTasksResult, RunResult, Task
 
 
@@ -69,6 +70,16 @@ class TestTask:
         task = Task.from_dict(data)
         assert task.task_uuid == "t1"
         assert not hasattr(task, "brand_new_field")
+
+    def test_from_dict_non_mapping_raises_namifusion_error(self):
+        # A gateway returning `200 text/html` reaches from_dict as a raw
+        # string; it must raise NamiFusionError (with the body on .detail),
+        # not a bare AttributeError from data.items(). Mirrors client.ts's
+        # response-shape check.
+        html = "<html><body>maintenance</body></html>"
+        with pytest.raises(NamiFusionError) as exc_info:
+            Task.from_dict(html)
+        assert exc_info.value.detail == html
 
 
 class TestRunResult:

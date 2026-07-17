@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import math
-from typing import TYPE_CHECKING, Any, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Mapping, Optional, Sequence, Tuple
 
 if TYPE_CHECKING:
     from ._types import Task
@@ -178,6 +178,15 @@ def _parse_error_body(body: Any) -> Tuple[str, Optional[str], Any]:
                 message = json.dumps(detail)
             return message, code, detail
 
+        # A non-Mapping JSON container — most notably FastAPI 422's *list*
+        # of validation errors — has no code/message keys, so JSON-serialize
+        # it into the message (matching errors.ts, which routes arrays
+        # through the same `JSON.stringify(detail)` branch as objects)
+        # instead of falling through to Python's `repr()` list rendering.
+        # `str`/`bytes` are excluded so plain-string details never land here.
+        if isinstance(detail, Sequence) and not isinstance(detail, (str, bytes)):
+            return json.dumps(detail), None, detail
+
         if detail is not None:
             return str(detail), None, detail
 
@@ -186,10 +195,14 @@ def _parse_error_body(body: Any) -> Tuple[str, Optional[str], Any]:
 
 def parse_retry_after_seconds(headers: Mapping[str, str]) -> Optional[float]:
     """Parses the ``Retry-After`` header as a number of seconds, capped at
-    30s. Returns ``None`` when absent or unparseable (e.g. the
+    60s. Returns ``None`` when absent or unparseable (e.g. the
     monthly-quota flavor of 429, which carries no Retry-After). Shared by
     ``_transport``'s retry loop so both call sites use the same
     parsing/cap logic.
+
+    The 60s cap matches be_mono's 60s rate-limit window (2026-07-17
+    holistic review): a shorter 30s cap would retry back inside the same
+    window and necessarily eat a second 429. Mirrors errors.ts's cap.
     """
     raw = headers.get("retry-after")
     if not raw:
@@ -200,7 +213,7 @@ def parse_retry_after_seconds(headers: Mapping[str, str]) -> Optional[float]:
         return None
     if not math.isfinite(seconds) or seconds < 0:
         return None
-    return min(seconds, 30)
+    return min(seconds, 60)
 
 
 def error_from_response(status: int, body: Any, headers: Mapping[str, str]) -> NamiFusionError:
