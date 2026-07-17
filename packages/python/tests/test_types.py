@@ -4,6 +4,8 @@
 server-side fields.
 """
 
+import pytest
+
 from namifusion._types import ListTasksResult, RunResult, Task
 
 
@@ -122,3 +124,9 @@ class TestListTasksResult:
         result = ListTasksResult.from_dict({"total": 0})
         assert result.total == 0
         assert result.items == []
+
+    def test_from_dict_raises_when_total_missing(self):
+        # A server response missing "total" must raise, not silently
+        # report a count of 0 and mask the malformed response.
+        with pytest.raises(TypeError):
+            ListTasksResult.from_dict({"items": []})

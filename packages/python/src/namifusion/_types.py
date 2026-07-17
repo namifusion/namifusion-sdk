@@ -90,5 +90,10 @@ class ListTasksResult:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ListTasksResult":
-        items = [Task.from_dict(item) for item in data.get("items", [])]
-        return cls(total=data.get("total", 0), items=items)
+        # Reuse the shared helper (rather than hand-rolling
+        # ``data.get("total", 0)``) so a response missing ``total`` raises
+        # the same error as a ``Task``/``RunResult`` response missing a
+        # required field, instead of silently reporting a count of 0.
+        merged: Dict[str, Any] = dict(data)
+        merged["items"] = [Task.from_dict(item) for item in data.get("items", [])]
+        return _from_dict(cls, merged)
