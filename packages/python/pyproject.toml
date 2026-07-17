@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "namifusion"
+version = "0.1.0"
+description = "Official Python SDK for the NamiFusion AI model marketplace API."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = [
+    "httpx>=0.27",
+]
+
+[project.urls]
+Homepage = "https://github.com/namifusion/namifusion-sdk"
+Repository = "https://github.com/namifusion/namifusion-sdk"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "build",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/namifusion"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
