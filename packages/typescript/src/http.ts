@@ -106,9 +106,14 @@ function retryAfterDelayMs(headers: Headers): number | undefined {
  * retried the same way; once retries are exhausted the *original* error is
  * re-thrown unchanged (no NamiFusionError wrapping) since it isn't an HTTP
  * response to map. An external `signal` abort is never retried — it
- * propagates immediately, including while a retry backoff is pending.
+ * propagates immediately, including before the first attempt (no `fetch`
+ * call is made at all) and while a retry backoff is pending.
  */
 export async function request<T>(opts: RequestOptions): Promise<T> {
+  if (opts.signal?.aborted) {
+    throw opts.signal.reason ?? new Error("Aborted");
+  }
+
   const bodyText = opts.body === undefined ? undefined : JSON.stringify(opts.body);
   const headers = buildHeaders(opts, bodyText !== undefined);
 

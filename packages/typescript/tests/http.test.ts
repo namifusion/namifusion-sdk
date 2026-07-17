@@ -4,6 +4,7 @@ import {
   AuthenticationError,
   InsufficientCreditsError,
   InvalidRequestError,
+  parseRetryAfterSeconds,
   RateLimitError,
   ServerError,
 } from "../src/errors.js";
@@ -88,7 +89,7 @@ describe("http.request", () => {
       .mockResolvedValue(jsonResponse(402, { detail: "Insufficient credits" }));
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const err = await request(baseOpts()).catch((e) => e);
+    const err = (await request(baseOpts()).catch((e) => e)) as InsufficientCreditsError;
     expect(err).toBeInstanceOf(InsufficientCreditsError);
     expect(err.status).toBe(402);
     expect(err.detail).toBe("Insufficient credits");
@@ -103,7 +104,7 @@ describe("http.request", () => {
     );
     globalThis.fetch = fetchMock as unknown as typeof fetch;
 
-    const err = await request(baseOpts()).catch((e) => e);
+    const err = (await request(baseOpts()).catch((e) => e)) as InsufficientCreditsError;
     expect(err).toBeInstanceOf(InsufficientCreditsError);
     expect(err.status).toBe(402);
     expect(err.code).toBe("insufficient_credits");
@@ -160,6 +161,27 @@ describe("http.request", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it("exhausts retries on repeated 429 and throws RateLimitError carrying retryAfter", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(429, { detail: "Too many requests" }, { "Retry-After": "3" }),
+      );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const promise = request(baseOpts({ maxRetries: 2 }));
+    const assertion = expect(promise).rejects.toBeInstanceOf(RateLimitError);
+    await vi.runAllTimersAsync();
+    await assertion;
+
+    const err = (await promise.catch((e) => e)) as RateLimitError;
+    expect(err.retryAfter).toBe(3);
+
+    // 1 initial attempt + 2 retries = 3 calls
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("does not retry a 400 (non-429 4xx)", async () => {
     const fetchMock = vi
       .fn()
@@ -207,6 +229,52 @@ describe("http.request", () => {
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
+
+  it("rejects immediately and never calls fetch when opts.signal is already aborted", async () => {
+    const controller = new AbortController();
+    const abortReason = new Error("cancelled before the call even started");
+    controller.abort(abortReason);
+
+    const fetchMock = vi.fn();
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      request(baseOpts({ signal: controller.signal })),
+    ).rejects.toBe(abortReason);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("interrupts a pending retry backoff immediately when opts.signal aborts mid-wait", async () => {
+    vi.useFakeTimers();
+    // Pin the jitter so the 503 backoff delay for attempt 0 is exactly 500ms
+    // (base 500 * jitterFactor 1.0), making the "abort well before the
+    // timer fires" assertion below non-flaky.
+    vi.spyOn(Math, "random").mockReturnValue(0.5);
+
+    const controller = new AbortController();
+    const abortReason = new Error("caller gave up while we were backing off");
+
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(jsonResponse(503, { detail: "Service unavailable" }));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const promise = request(baseOpts({ signal: controller.signal, maxRetries: 2 }));
+    const assertion = expect(promise).rejects.toBe(abortReason);
+
+    // Let the first (503) attempt resolve and the retry backoff timer get
+    // scheduled, but stay well short of the 500ms delay.
+    await vi.advanceTimersByTimeAsync(100);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    controller.abort(abortReason);
+    await assertion;
+
+    // Draining any remaining timers must not trigger a second fetch call —
+    // the pending backoff was cancelled, not merely raced.
+    await vi.runAllTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("computeBackoffDelayMs", () => {
@@ -222,5 +290,21 @@ describe("computeBackoffDelayMs", () => {
   it("applies up to +-20% jitter", () => {
     expect(computeBackoffDelayMs(1, () => 0)).toBe(800); // 1000 * 0.8
     expect(computeBackoffDelayMs(1, () => 1)).toBe(1200); // 1000 * 1.2
+  });
+});
+
+describe("parseRetryAfterSeconds", () => {
+  it("caps a Retry-After above 30s down to 30", () => {
+    expect(parseRetryAfterSeconds(new Headers({ "Retry-After": "100" }))).toBe(30);
+  });
+
+  it("passes through values at or below the 30s cap unchanged", () => {
+    expect(parseRetryAfterSeconds(new Headers({ "Retry-After": "30" }))).toBe(30);
+    expect(parseRetryAfterSeconds(new Headers({ "Retry-After": "5" }))).toBe(5);
+  });
+
+  it("returns undefined when the header is absent or unparseable", () => {
+    expect(parseRetryAfterSeconds(new Headers())).toBeUndefined();
+    expect(parseRetryAfterSeconds(new Headers({ "Retry-After": "not-a-number" }))).toBeUndefined();
   });
 });
