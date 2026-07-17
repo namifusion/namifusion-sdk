@@ -1,6 +1,5 @@
-"""Confirms Task 4's public surface: __init__.py exports errors + types
-only (no client — that's Task 5), matching the brief's "暂只导出异常与
-类型" instruction.
+"""Confirms namifusion/__init__.py's public surface: errors, data types,
+and (as of Task 5) the NamiFusion / AsyncNamiFusion clients + to_data_url.
 """
 
 import namifusion
@@ -31,8 +30,11 @@ def test_version():
     assert namifusion.__version__ == "0.1.0"
 
 
-def test_client_not_yet_exported():
-    # NamiFusion / AsyncNamiFusion land in Task 5 — Task 4 must not
-    # pre-emptively expose (or implement) the client.
-    assert not hasattr(namifusion, "NamiFusion")
-    assert not hasattr(namifusion, "AsyncNamiFusion")
+def test_exports_client_classes():
+    assert hasattr(namifusion, "NamiFusion")
+    assert hasattr(namifusion, "AsyncNamiFusion")
+
+
+def test_exports_to_data_url():
+    assert hasattr(namifusion, "to_data_url")
+    assert namifusion.to_data_url(b"Hello", "text/plain") == "data:text/plain;base64,SGVsbG8="
