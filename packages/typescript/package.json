@@ -1,0 +1,40 @@
+{
+  "name": "@namifusion/client",
+  "version": "0.1.0",
+  "description": "Official TypeScript/JavaScript SDK for the NamiFusion AI model marketplace API.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/namifusion/namifusion-sdk",
+    "directory": "packages/typescript"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  }
+}
