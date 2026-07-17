@@ -64,8 +64,8 @@ for the first release.
 
 Do these once, before the very first `npm publish` / `twine upload`:
 
-- [ ] Replace the placeholder GitHub URL (`https://github.com/namifusion/namifusion-sdk`)
-      with the real repository URL once the org/repo is created. It appears in:
+- [ ] Confirm the GitHub URL (`https://github.com/namifusion/namifusion-sdk`)
+      is correct in every place it appears:
   - `packages/typescript/package.json` (`repository.url`)
   - `packages/python/pyproject.toml` (`[project.urls]` — `Homepage`, `Repository`)
   - `README.md` (repository link)
